@@ -70,8 +70,6 @@ class CausalSelfAttention(nn.Module):
         self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
         self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
-        # GATED ATTENTION
-        # self.c_gate = nn.Linear(self.n_embd, self.n_embd, bias=False)
         self.ve_gate_channels = 32
         self.ve_gate = nn.Linear(self.ve_gate_channels, self.n_kv_head, bias=False) if has_ve(layer_idx, config.n_layer) else None
 
@@ -117,9 +115,6 @@ class CausalSelfAttention(nn.Module):
         # Re-assemble the heads and project back to residual stream
         y = y.contiguous().view(B, T, -1)
 
-        # GATED ATTENTION
-        # y = y * F.silu(self.c_gate(x))
-
         y = self.c_proj(y)
         return y
 
@@ -136,6 +131,18 @@ class MLP(nn.Module):
         x = self.c_proj(x)
         return x
 
+# class MLP(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         # 2/3 reduction to keep FFN params matched to ReLU² baseline
+#         self.ffn_hidden = int(2/3 * 4 * config.n_embd)
+#         self.c_fc   = nn.Linear(config.n_embd, self.ffn_hidden, bias=False)
+#         self.c_gate = nn.Linear(config.n_embd, self.ffn_hidden, bias=False)
+#         self.c_proj = nn.Linear(self.ffn_hidden, config.n_embd, bias=False)
+#
+#     def forward(self, x):
+#         return self.c_proj(F.silu(self.c_fc(x)) * self.c_gate(x))
+
 
 class Block(nn.Module):
     def __init__(self, config, layer_idx):
@@ -144,13 +151,13 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        # Peri-LN for attention: x + Norm(Attn(Norm(x)))
+        # Classic Pre-LN: x + Attn(Norm(x))
         a = self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
-        x = x + norm(a)
+        x = x + a
 
-        # Peri-LN for MLP: x + Norm(MLP(Norm(x)))
+        # Classic Pre-LN: x + MLP(Norm(x))
         m = self.mlp(norm(x))
-        x = x + norm(m)
+        x = x + m
 
         return x
 
