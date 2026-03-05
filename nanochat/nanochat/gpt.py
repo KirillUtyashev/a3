@@ -118,30 +118,31 @@ class CausalSelfAttention(nn.Module):
         y = self.c_proj(y)
         return y
 
+#
+# class MLP(nn.Module):
+#     def __init__(self, config):
+#         super().__init__()
+#         self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
+#         self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+#
+#     def forward(self, x):
+#         x = self.c_fc(x)
+#         x = F.relu(x).square()
+#         x = self.c_proj(x)
+#         return x
+
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        # 2/3 reduction to keep FFN params matched to ReLU² baseline
+        self.ffn_hidden = int(2/3 * 4 * config.n_embd)
+        self.c_fc   = nn.Linear(config.n_embd, self.ffn_hidden, bias=False)
+        self.c_gate = nn.Linear(config.n_embd, self.ffn_hidden, bias=False)
+        self.c_proj = nn.Linear(self.ffn_hidden, config.n_embd, bias=False)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square()
-        x = self.c_proj(x)
-        return x
-
-# class MLP(nn.Module):
-#     def __init__(self, config):
-#         super().__init__()
-#         # 2/3 reduction to keep FFN params matched to ReLU² baseline
-#         self.ffn_hidden = int(2/3 * 4 * config.n_embd)
-#         self.c_fc   = nn.Linear(config.n_embd, self.ffn_hidden, bias=False)
-#         self.c_gate = nn.Linear(config.n_embd, self.ffn_hidden, bias=False)
-#         self.c_proj = nn.Linear(self.ffn_hidden, config.n_embd, bias=False)
-#
-#     def forward(self, x):
-#         return self.c_proj(F.silu(self.c_fc(x)) * self.c_gate(x))
+        return self.c_proj(F.silu(self.c_fc(x)) * self.c_gate(x))
 
 
 class Block(nn.Module):
@@ -151,13 +152,13 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, ve, cos_sin, window_size, kv_cache):
-        # Classic Pre-LN: x + Attn(Norm(x))
+        # Peri-LN for attention: x + Norm(Attn(Norm(x)))
         a = self.attn(norm(x), ve, cos_sin, window_size, kv_cache)
-        x = x + a
+        x = x + norm(a)
 
-        # Classic Pre-LN: x + MLP(Norm(x))
+        # Peri-LN for MLP: x + Norm(MLP(Norm(x)))
         m = self.mlp(norm(x))
-        x = x + m
+        x = x + norm(m)
 
         return x
 
@@ -324,7 +325,7 @@ class GPT(nn.Module):
         # Exclude non-matmul params: embeddings and per-layer scalars
         value_embeds_numel = sum(ve.weight.numel() for ve in self.value_embeds.values())
         nparams_exclude = (self.transformer.wte.weight.numel() + value_embeds_numel +
-                          self.resid_lambdas.numel() + self.x0_lambdas.numel())
+                           self.resid_lambdas.numel() + self.x0_lambdas.numel())
         h, q, t = self.config.n_head, self.config.n_embd // self.config.n_head, self.config.sequence_len
         # Sum attention FLOPs per layer, accounting for sliding window
         attn_flops = 0
